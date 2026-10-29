@@ -9,7 +9,7 @@ import { Audio, InterruptionModeAndroid } from 'expo-av';
 import * as IntentLauncher from 'expo-intent-launcher';
 import {
   PAIRS, SOURCES, DEFAULT_SETTINGS, fmt, steps, loadAlarms, saveAlarms,
-  loadSettings, saveSettings, getPrices, checkAlarms,
+  loadSettings, saveSettings, getPrices, checkAlarms, customPrice,
 } from './src/core';
 import { setupBackground, notifyFired } from './src/bg';
 
@@ -239,8 +239,10 @@ function AlarmModal({ alarm, prices, settings, onSave, onClose }) {
   const [pair, setPair] = useState('EUR/USD');
   const [cond, setCond] = useState('above');
   const [text, setText] = useState('');
+  const [open, setOpen] = useState(false);
   useEffect(() => {
     if (!alarm) return;
+    setOpen(false);
     setPair(alarm.pair || 'EUR/USD');
     setCond(alarm.condition || 'above');
     setText(alarm.price != null ? fmt(alarm.pair, alarm.price) : '');
@@ -271,11 +273,20 @@ function AlarmModal({ alarm, prices, settings, onSave, onClose }) {
       <View style={s.sheet}>
         <ScrollView keyboardShouldPersistTaps="handled">
           <Text style={s.sheetTitle}>{alarm?.id ? 'Editar alarma' : 'Crear alarma'}</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 14 }}>
-            {PAIRS.map((p) => (
-              <Chip key={p} text={p} on={p === pair} onPress={() => setPair(p)} />
-            ))}
-          </ScrollView>
+          <Pressable style={s.select} onPress={() => setOpen((o) => !o)}>
+            <Text style={s.selectTxt}>{pair}</Text>
+            <Text style={{ color: C.muted, fontSize: 16 }}>{open ? '▴' : '▾'}</Text>
+          </Pressable>
+          {open && (
+            <View style={s.options}>
+              {PAIRS.map((p) => (
+                <Pressable key={p} style={[s.option, p === pair && { backgroundColor: C.line }]}
+                  onPress={() => { setPair(p); setOpen(false); }}>
+                  <Text style={{ color: C.text, fontSize: 16, fontWeight: p === pair ? '800' : '500' }}>{p}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
           <View style={s.seg}>
             {[['above', 'POR ENCIMA', C.above], ['below', 'POR DEBAJO', C.below]].map(([k, t, col]) => (
               <Pressable key={k} onPress={() => setCond(k)}
@@ -335,6 +346,12 @@ function SettingsModal({ visible, settings, onChange, onClose }) {
       if (typeof uri === 'string' && uri) onChange({ tone: uri });
     } catch (e) { Alert.alert('No se pudo abrir el selector de tonos', String(e?.message || e)); }
   };
+  const testSource = async () => {
+    try {
+      const v = await customPrice(settings, 'EUR/USD');
+      Alert.alert('Fuente correcta', `EUR/USD = ${fmt('EUR/USD', v)}`);
+    } catch (e) { Alert.alert('La fuente no responde bien', String(e?.message || e)); }
+  };
   const setRefresh = (v) => onChange({ refresh: Math.max(1, Math.min(300, v)) });
 
   return (
@@ -348,13 +365,35 @@ function SettingsModal({ visible, settings, onChange, onClose }) {
           {SOURCES.map((src) => (
             <Pressable key={src.id} style={s.radio} onPress={() => onChange({ source: src.id })}>
               <View style={[s.dot, settings.source === src.id && { backgroundColor: C.spot, borderColor: C.spot }]} />
-              <Text style={{ color: C.text, flex: 1 }}>{src.name}{src.id === 'icm' ? ' (por defecto)' : ''}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: C.text }}>{src.name}{src.id === 'icm' ? ' (por defecto)' : ''}</Text>
+                <Text style={s.note}>{src.note}</Text>
+              </View>
             </Pressable>
           ))}
           {settings.source === 'av' && (
             <TextInput value={settings.apiKey} onChangeText={(t) => onChange({ apiKey: t.trim() })}
               placeholder="API Key de Alpha Vantage" placeholderTextColor={C.muted}
               autoCapitalize="none" autoCorrect={false} style={s.keyInput} />
+          )}
+          {settings.source === 'custom' && (
+            <View>
+              <Text style={s.note}>URL (https). Marcadores: {'{SYMBOL}'} = EUR/USD, {'{PAIR}'} = EURUSD, {'{BASE}'} = EUR, {'{QUOTE}'} = USD</Text>
+              <TextInput value={settings.customUrl} onChangeText={(t) => onChange({ customUrl: t })} multiline
+                placeholder="https://api.twelvedata.com/price?symbol={SYMBOL}&apikey=TU_CLAVE" placeholderTextColor={C.muted}
+                autoCapitalize="none" autoCorrect={false} style={s.keyInput} />
+              <Text style={[s.note, { marginTop: 10 }]}>Ruta del precio en el JSON (vacío si la respuesta es solo el número)</Text>
+              <TextInput value={settings.customPath} onChangeText={(t) => onChange({ customPath: t })}
+                placeholder="price   ·   prices[0].closeoutAsk" placeholderTextColor={C.muted}
+                autoCapitalize="none" autoCorrect={false} style={s.keyInput} />
+              <Text style={[s.note, { marginTop: 10 }]}>Cabeceras opcionales, una por línea</Text>
+              <TextInput value={settings.customHeaders} onChangeText={(t) => onChange({ customHeaders: t })} multiline
+                placeholder="Authorization: Bearer TU_TOKEN" placeholderTextColor={C.muted}
+                autoCapitalize="none" autoCorrect={false} style={s.keyInput} />
+              <Pressable style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={testSource}>
+                <Text style={s.btnTxt}>Probar fuente (EUR/USD)</Text>
+              </Pressable>
+            </View>
           )}
 
           <Text style={s.section}>Intervalo de refresco</Text>
@@ -430,6 +469,11 @@ const s = StyleSheet.create({
   section: { color: C.muted, fontSize: 14, fontWeight: '700', marginTop: 16, marginBottom: 8 },
   radio: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
   dot: { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: C.muted, marginRight: 12 },
+  note: { color: C.muted, fontSize: 12, marginTop: 2 },
+  select: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: C.bg, borderRadius: 12, borderWidth: 1, borderColor: C.line, paddingVertical: 14, paddingHorizontal: 16, marginBottom: 14 },
+  selectTxt: { color: C.text, fontSize: 20, fontWeight: '800' },
+  options: { backgroundColor: C.bg, borderRadius: 12, borderWidth: 1, borderColor: C.line, marginTop: -6, marginBottom: 14, overflow: 'hidden' },
+  option: { paddingVertical: 13, paddingHorizontal: 16 },
   keyInput: { color: C.text, backgroundColor: C.bg, borderRadius: 10, padding: 12, marginTop: 6 },
   stepper: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 },
   refresh: { color: C.text, fontSize: 22, fontWeight: '800', minWidth: 70, textAlign: 'center' },
