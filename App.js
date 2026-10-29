@@ -141,8 +141,7 @@ export default function App() {
     } else ring.stop();
   }, [isRinging, ring]);
 
-  const activeCount = alarms.filter((a) => a.enabled).length;
-  useEffect(() => { if (ready) syncService(activeCount).catch(() => {}); }, [ready, activeCount]);
+  useEffect(() => { if (ready) syncService(alarms); }, [ready, alarms]);
 
   const dismiss = () => commit(alarmsRef.current.map((a) => (a.fired ? { ...a, fired: false, enabled: false } : a)));
 
@@ -278,6 +277,11 @@ function AlarmModal({ alarm, prices, settings, onSave, onDelete, onClose }) {
   };
 
   const adj = [[-macro, '-'], [-micro, '-'], [micro, '+'], [macro, '+']];
+  const renderAdj = ([d, sg]) => (
+    <Pressable key={d} style={s.adjBtn} onPress={() => adjust(d)}>
+      <Text style={s.adjTxt} numberOfLines={1} adjustsFontSizeToFit>{sg}{label(Math.abs(d))}</Text>
+    </Pressable>
+  );
   return (
     <Modal visible={alarm !== null} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={s.backdrop} onPress={onClose} />
@@ -313,24 +317,22 @@ function AlarmModal({ alarm, prices, settings, onSave, onDelete, onClose }) {
             onFocus={() => setTimeout(() => inputRef.current?.setSelection(text.length, text.length), 50)}
           />
           <View style={s.adjRow}>
-            {adj.map(([d, sg]) => (
-              <Pressable key={d} style={s.adjBtn} onPress={() => adjust(d)}>
-                <Text style={s.adjTxt}>{sg}{label(Math.abs(d))}</Text>
-              </Pressable>
-            ))}
+            {adj.slice(0, 2).map(renderAdj)}
+            <Pressable style={s.spotBtn} onPress={useSpot}>
+              <Text style={s.spotLbl} numberOfLines={1} adjustsFontSizeToFit>● Spot Actual</Text>
+              {prices[pair] != null && <Text style={s.spotPx}>{fmt(pair, prices[pair])}</Text>}
+            </Pressable>
+            {adj.slice(2).map(renderAdj)}
           </View>
-          <Pressable style={s.spotBtn} onPress={useSpot}>
-            <Text style={{ color: C.spot, fontWeight: '700' }}>● Spot Actual{prices[pair] != null ? `  ${fmt(pair, prices[pair])}` : ''}</Text>
-          </Pressable>
-          <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
+          <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+            {alarm?.id && (
+              <Pressable style={[s.btn, s.delBtn]} onPress={() => onDelete(alarm)}><Text style={s.delTxt}>Eliminar</Text></Pressable>
+            )}
             <Pressable style={[s.btn, { backgroundColor: C.line }]} onPress={onClose}><Text style={s.btnTxt}>Cancelar</Text></Pressable>
             <Pressable style={[s.btn, { backgroundColor: C.spot }]} onPress={save}>
-              <Text style={[s.btnTxt, { color: '#06281d' }]}>{alarm?.id ? 'Guardar cambios' : 'Crear alarma'}</Text>
+              <Text style={[s.btnTxt, { color: '#06281d' }]}>Guardar</Text>
             </Pressable>
           </View>
-          {alarm?.id && (
-            <Pressable style={s.delBtn} onPress={() => onDelete(alarm)}><Text style={s.delTxt}>Eliminar alarma</Text></Pressable>
-          )}
         </ScrollView>
       </View>
     </Modal>
@@ -497,7 +499,7 @@ const s = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: '#000A' },
   sheet: { backgroundColor: C.card, borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 20, maxHeight: '88%' },
   sheetScroll: { flexShrink: 1 },
-  delBtn: { marginTop: 14, paddingVertical: 14, alignItems: 'center', borderRadius: 12, borderWidth: 1, borderColor: C.danger },
+  delBtn: { borderWidth: 1, borderColor: C.danger },
   delTxt: { color: C.danger, fontWeight: '800', fontSize: 16 },
   status: { color: C.muted, fontSize: 12, paddingHorizontal: 20, marginTop: -6, marginBottom: 6 },
   sheetTitle: { color: C.text, fontSize: 20, fontWeight: '800', marginBottom: 14 },
@@ -505,10 +507,12 @@ const s = StyleSheet.create({
   seg: { flexDirection: 'row', backgroundColor: C.bg, borderRadius: 12, padding: 4, marginBottom: 14 },
   segBtn: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 9 },
   input: { color: C.text, fontSize: 34, fontWeight: '700', textAlign: 'center', backgroundColor: C.bg, borderRadius: 12, paddingVertical: 14, marginBottom: 12 },
-  adjRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  adjBtn: { flex: 1, backgroundColor: C.line, borderRadius: 10, paddingVertical: 13, alignItems: 'center' },
+  adjRow: { flexDirection: 'row', gap: 6, marginBottom: 12 },
+  adjBtn: { flex: 1, backgroundColor: C.line, borderRadius: 10, paddingVertical: 13, paddingHorizontal: 2, alignItems: 'center', justifyContent: 'center' },
   adjTxt: { color: C.text, fontWeight: '700', fontSize: 15 },
-  spotBtn: { borderWidth: 1, borderColor: C.spot, borderRadius: 10, paddingVertical: 13, alignItems: 'center', marginBottom: 12 },
+  spotBtn: { flex: 1.8, borderWidth: 1, borderColor: C.spot, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 2, alignItems: 'center', justifyContent: 'center' },
+  spotLbl: { color: C.spot, fontWeight: '700', fontSize: 13 },
+  spotPx: { color: C.spot, fontSize: 11 },
   btn: { flex: 1, borderRadius: 12, paddingVertical: 15, alignItems: 'center' },
   btnTxt: { color: C.text, fontWeight: '800', fontSize: 16 },
   section: { color: C.muted, fontSize: 14, fontWeight: '700', marginTop: 16, marginBottom: 8 },
