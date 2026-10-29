@@ -10,7 +10,10 @@
       "permissions": [
         "RECEIVE_BOOT_COMPLETED",
         "POST_NOTIFICATIONS",
-        "WAKE_LOCK"
+        "WAKE_LOCK",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_DATA_SYNC",
+        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -24,7 +27,8 @@
           "icon": "./assets/notification-icon.png",
           "color": "#10B981"
         }
-      ]
+      ],
+      "./plugins/withForegroundService.js"
     ],
     "icon": "./assets/icon.png"
   }

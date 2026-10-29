@@ -9,9 +9,10 @@ import { Audio, InterruptionModeAndroid } from 'expo-av';
 import * as IntentLauncher from 'expo-intent-launcher';
 import {
   PAIRS, SOURCES, DEFAULT_SETTINGS, fmt, steps, loadAlarms, saveAlarms,
-  loadSettings, saveSettings, getPrices, checkAlarms, customPrice,
+  loadSettings, saveSettings, getPrices, checkAlarms, customPrice, feed,
 } from './src/core';
 import { setupBackground, notifyFired } from './src/bg';
+import { syncService } from './src/service';
 
 // Tono de alarma del sistema (el que tengas configurado en Android)
 const DEFAULT_TONE = 'content://settings/system/alarm_alert';
@@ -68,6 +69,7 @@ export default function App() {
   const [editing, setEditing] = useState(null); // null | {} (nueva) | alarma
   const [showSettings, setShowSettings] = useState(false);
   const [ready, setReady] = useState(false);
+  const [status, setStatus] = useState({ at: 0, error: null });
   const alarmsRef = useRef([]);
   const settingsRef = useRef(DEFAULT_SETTINGS);
   const busy = useRef(false);
@@ -90,12 +92,14 @@ export default function App() {
     })();
   }, []);
 
-  const tick = useCallback(async () => {
+  const tick = useCallback(async (all = false) => {
     if (busy.current) return;
     busy.current = true;
     try {
-      const pairs = [...new Set(alarmsRef.current.map((a) => a.pair))];
+      const pool = alarmsRef.current.filter((a) => all || (a.enabled && !a.fired));
+      const pairs = [...new Set(pool.map((a) => a.pair))];
       const p = await getPrices(settingsRef.current, pairs);
+      setStatus({ at: feed.at, error: feed.error });
       if (!Object.keys(p).length) return;
       setPrices((prev) => ({ ...prev, ...p }));
       const { alarms: next, fired } = checkAlarms(alarmsRef.current, p);
@@ -107,12 +111,12 @@ export default function App() {
   }, [commit]);
 
   const [refreshing, setRefreshing] = useState(false);
-  const onRefresh = async () => { setRefreshing(true); await tick(); setRefreshing(false); };
+  const onRefresh = async () => { setRefreshing(true); await tick(true); setRefreshing(false); };
 
   useEffect(() => {
     if (!ready) return undefined;
-    tick();
-    const id = setInterval(tick, settings.refresh * 1000);
+    tick(true);
+    const id = setInterval(() => tick(), settings.refresh * 1000);
     return () => clearInterval(id);
   }, [ready, settings.refresh, settings.source, settings.apiKey, alarms.length, tick]);
 
@@ -122,7 +126,7 @@ export default function App() {
       if (st !== 'active') return;
       const a = await loadAlarms();
       alarmsRef.current = a; setAlarms(a);
-      tick();
+      tick(true);
     });
     return () => sub.remove();
   }, [tick]);
@@ -137,6 +141,9 @@ export default function App() {
     } else ring.stop();
   }, [isRinging, ring]);
 
+  const activeCount = alarms.filter((a) => a.enabled).length;
+  useEffect(() => { if (ready) syncService(activeCount).catch(() => {}); }, [ready, activeCount]);
+
   const dismiss = () => commit(alarmsRef.current.map((a) => (a.fired ? { ...a, fired: false, enabled: false } : a)));
 
   const saveAlarm = (data) => {
@@ -150,7 +157,7 @@ export default function App() {
     'Eliminar alarma',
     `¿Seguro que quieres eliminar la alarma de ${a.pair} ${a.condition === 'above' ? 'por encima de' : 'por debajo de'} ${fmt(a.pair, a.price)}? Esta acción no se puede deshacer.`,
     [{ text: 'Cancelar', style: 'cancel' },
-     { text: 'Eliminar', style: 'destructive', onPress: () => commit(alarmsRef.current.filter((x) => x.id !== a.id)) }],
+     { text: 'Eliminar', style: 'destructive', onPress: () => { commit(alarmsRef.current.filter((x) => x.id !== a.id)); setEditing(null); } }],
   );
 
   const groups = useMemo(() => [...new Set(alarms.map((a) => a.pair))].sort().map((pair) => {
@@ -172,6 +179,11 @@ export default function App() {
         <Text style={s.title}>Alarmas</Text>
         <Pressable onPress={() => setShowSettings(true)} hitSlop={10}><Text style={s.link}>Ajustes</Text></Pressable>
       </View>
+      {alarms.length > 0 && (
+        <Text numberOfLines={2} style={[s.status, status.error && { color: C.danger }]}>
+          {status.error ? `⚠ ${status.error}` : status.at ? `● Actualizado ${new Date(status.at).toLocaleTimeString()}` : 'Conectando…'}
+        </Text>
+      )}
 
       {ready && alarms.length === 0 ? (
         <View style={s.welcome}>
@@ -202,9 +214,6 @@ export default function App() {
                   </View>
                   <Switch value={it.a.enabled} onValueChange={() => toggle(it.a.id)}
                     trackColor={{ true: C.spot, false: C.line }} thumbColor="#fff" />
-                  <Pressable onPress={() => remove(it.a)} hitSlop={10} style={{ paddingLeft: 14 }}>
-                    <Text style={{ fontSize: 22 }}>🗑</Text>
-                  </Pressable>
                 </Pressable>
               ))}
             </View>
@@ -216,8 +225,9 @@ export default function App() {
         <Pressable style={s.fab} onPress={() => setEditing({})}><Text style={s.fabTxt}>+</Text></Pressable>
       )}
 
-      <AlarmModal alarm={editing} prices={prices} settings={settings} onSave={saveAlarm} onClose={() => setEditing(null)} />
-      <SettingsModal visible={showSettings} settings={settings} onChange={changeSettings} onClose={() => setShowSettings(false)} />
+      <AlarmModal alarm={editing} prices={prices} settings={settings} onSave={saveAlarm} onDelete={remove} onClose={() => setEditing(null)} />
+      <SettingsModal visible={showSettings} settings={settings}
+        activePairs={new Set(alarms.filter((a) => a.enabled && !a.fired).map((a) => a.pair)).size} onChange={changeSettings} onClose={() => setShowSettings(false)} />
 
       <Modal visible={isRinging} animationType="fade" onRequestClose={() => {}}>
         <View style={s.ringing}>
@@ -235,7 +245,8 @@ export default function App() {
 }
 
 // ---------- modal crear / editar ----------
-function AlarmModal({ alarm, prices, settings, onSave, onClose }) {
+function AlarmModal({ alarm, prices, settings, onSave, onDelete, onClose }) {
+  const inputRef = useRef(null);
   const [pair, setPair] = useState('EUR/USD');
   const [cond, setCond] = useState('above');
   const [text, setText] = useState('');
@@ -271,7 +282,7 @@ function AlarmModal({ alarm, prices, settings, onSave, onClose }) {
     <Modal visible={alarm !== null} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={s.backdrop} onPress={onClose} />
       <View style={s.sheet}>
-        <ScrollView keyboardShouldPersistTaps="handled">
+        <ScrollView keyboardShouldPersistTaps="handled" style={s.sheetScroll}>
           <Text style={s.sheetTitle}>{alarm?.id ? 'Editar alarma' : 'Crear alarma'}</Text>
           <Pressable style={s.select} onPress={() => setOpen((o) => !o)}>
             <Text style={s.selectTxt}>{pair}</Text>
@@ -296,8 +307,10 @@ function AlarmModal({ alarm, prices, settings, onSave, onClose }) {
             ))}
           </View>
           <TextInput
+            ref={inputRef}
             value={text} onChangeText={setText} keyboardType="decimal-pad" placeholder={fmt(pair, 0)}
-            placeholderTextColor={C.line} style={[s.input, s.num]} selectTextOnFocus
+            placeholderTextColor={C.line} style={[s.input, s.num]}
+            onFocus={() => setTimeout(() => inputRef.current?.setSelection(text.length, text.length), 50)}
           />
           <View style={s.adjRow}>
             {adj.map(([d, sg]) => (
@@ -315,6 +328,9 @@ function AlarmModal({ alarm, prices, settings, onSave, onClose }) {
               <Text style={[s.btnTxt, { color: '#06281d' }]}>{alarm?.id ? 'Guardar cambios' : 'Crear alarma'}</Text>
             </Pressable>
           </View>
+          {alarm?.id && (
+            <Pressable style={s.delBtn} onPress={() => onDelete(alarm)}><Text style={s.delTxt}>Eliminar alarma</Text></Pressable>
+          )}
         </ScrollView>
       </View>
     </Modal>
@@ -322,7 +338,20 @@ function AlarmModal({ alarm, prices, settings, onSave, onClose }) {
 }
 
 // ---------- modal configuración ----------
-function SettingsModal({ visible, settings, onChange, onClose }) {
+function SettingsModal({ visible, settings, activePairs, onChange, onClose }) {
+  const limited = settings.source === 'twelve' || /twelvedata\.com/i.test(settings.customUrl || '');
+  const perMin = (activePairs * 60) / settings.refresh;
+  const perDay = Math.round((activePairs * 86400) / settings.refresh);
+  const over = perDay > 800 || perMin > 8;
+  const batteryExempt = async () => {
+    try {
+      await IntentLauncher.startActivityAsync('android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+        { data: 'package:com.fer.alarmasforex' });
+    } catch {
+      try { await IntentLauncher.startActivityAsync('android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS'); }
+      catch (e) { Alert.alert('No se pudo abrir el ajuste', String(e?.message || e)); }
+    }
+  };
   const test = useLoopSound();
   const [testing, setTesting] = useState(false);
   useEffect(() => { if (!visible) { test.stop(); setTesting(false); } }, [visible, test]);
@@ -358,7 +387,7 @@ function SettingsModal({ visible, settings, onChange, onClose }) {
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={s.backdrop} onPress={onClose} />
       <View style={s.sheet}>
-        <ScrollView keyboardShouldPersistTaps="handled">
+        <ScrollView keyboardShouldPersistTaps="handled" style={s.sheetScroll}>
           <Text style={s.sheetTitle}>Ajustes</Text>
 
           <Text style={s.section}>Fuente de datos</Text>
@@ -366,14 +395,14 @@ function SettingsModal({ visible, settings, onChange, onClose }) {
             <Pressable key={src.id} style={s.radio} onPress={() => onChange({ source: src.id })}>
               <View style={[s.dot, settings.source === src.id && { backgroundColor: C.spot, borderColor: C.spot }]} />
               <View style={{ flex: 1 }}>
-                <Text style={{ color: C.text }}>{src.name}{src.id === 'icm' ? ' (por defecto)' : ''}</Text>
+                <Text style={{ color: C.text }}>{src.name}</Text>
                 <Text style={s.note}>{src.note}</Text>
               </View>
             </Pressable>
           ))}
-          {settings.source === 'av' && (
+          {settings.source === 'twelve' && (
             <TextInput value={settings.apiKey} onChangeText={(t) => onChange({ apiKey: t.trim() })}
-              placeholder="API Key de Alpha Vantage" placeholderTextColor={C.muted}
+              placeholder="API Key de Twelve Data" placeholderTextColor={C.muted}
               autoCapitalize="none" autoCorrect={false} style={s.keyInput} />
           )}
           {settings.source === 'custom' && (
@@ -390,10 +419,16 @@ function SettingsModal({ visible, settings, onChange, onClose }) {
               <TextInput value={settings.customHeaders} onChangeText={(t) => onChange({ customHeaders: t })} multiline
                 placeholder="Authorization: Bearer TU_TOKEN" placeholderTextColor={C.muted}
                 autoCapitalize="none" autoCorrect={false} style={s.keyInput} />
-              <Pressable style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={testSource}>
-                <Text style={s.btnTxt}>Probar fuente (EUR/USD)</Text>
-              </Pressable>
             </View>
+          )}
+          <Pressable style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={testSource}>
+            <Text style={s.btnTxt}>Probar fuente (EUR/USD)</Text>
+          </Pressable>
+          {limited && (
+            <Text style={[s.note, { marginTop: 8, color: over ? C.danger : C.muted }]}>
+              Con {activePairs} par{activePairs === 1 ? '' : 'es'} vigilado{activePairs === 1 ? '' : 's'} y refresco de {fmtInt(settings.refresh)}: ≈{perDay} consultas/día y {perMin.toFixed(1)}/min (límite gratis: 800/día y 8/min).
+              {over ? ' Te quedarás sin cuota: sube el intervalo.' : ''}
+            </Text>
           )}
 
           <Text style={s.section}>Intervalo de refresco</Text>
@@ -417,6 +452,12 @@ function SettingsModal({ visible, settings, onChange, onClose }) {
           </Pressable>
           <Pressable style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={toggleTest}>
             <Text style={s.btnTxt}>{testing ? '■ Detener prueba' : '▶ Probar sonido'}</Text>
+          </Pressable>
+
+          <Text style={s.section}>Segundo plano</Text>
+          <Text style={s.note}>Mientras haya alarmas activas la app mantiene una notificación fija para seguir vigilando con el móvil bloqueado. Quita también la optimización de batería. Tras reiniciar el móvil, abre la app una vez.</Text>
+          <Pressable style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={batteryExempt}>
+            <Text style={s.btnTxt}>Quitar optimización de batería</Text>
           </Pressable>
 
           <Pressable style={[s.btn, { backgroundColor: C.spot, marginTop: 18 }]} onPress={onClose}>
@@ -455,6 +496,10 @@ const s = StyleSheet.create({
   fabTxt: { color: '#06281d', fontSize: 34, marginTop: -2, fontWeight: '600' },
   backdrop: { flex: 1, backgroundColor: '#000A' },
   sheet: { backgroundColor: C.card, borderTopLeftRadius: 22, borderTopRightRadius: 22, padding: 20, maxHeight: '88%' },
+  sheetScroll: { flexShrink: 1 },
+  delBtn: { marginTop: 14, paddingVertical: 14, alignItems: 'center', borderRadius: 12, borderWidth: 1, borderColor: C.danger },
+  delTxt: { color: C.danger, fontWeight: '800', fontSize: 16 },
+  status: { color: C.muted, fontSize: 12, paddingHorizontal: 20, marginTop: -6, marginBottom: 6 },
   sheetTitle: { color: C.text, fontSize: 20, fontWeight: '800', marginBottom: 14 },
   chip: { borderWidth: 1, borderColor: C.line, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, marginRight: 8, marginBottom: 8 },
   seg: { flexDirection: 'row', backgroundColor: C.bg, borderRadius: 12, padding: 4, marginBottom: 14 },
