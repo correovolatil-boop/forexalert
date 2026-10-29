@@ -1,22 +1,22 @@
 import './src/bg';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
-  View, Text, Pressable, ScrollView, Modal, TextInput, Switch, Alert,
+  View, Text, Pressable, ScrollView, Modal, TextInput, Switch, Alert, RefreshControl,
   AppState, StatusBar as RNStatusBar, StyleSheet,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeAndroid } from 'expo-av';
+import * as IntentLauncher from 'expo-intent-launcher';
 import {
   PAIRS, SOURCES, DEFAULT_SETTINGS, fmt, steps, loadAlarms, saveAlarms,
   loadSettings, saveSettings, getPrices, checkAlarms,
 } from './src/core';
 import { setupBackground, notifyFired } from './src/bg';
 
-const TONES = [
-  { name: 'Sirena', src: require('./assets/sirena.wav') },
-  { name: 'Pulso', src: require('./assets/pulso.wav') },
-  { name: 'Campana', src: require('./assets/campana.wav') },
-];
+// Tono de alarma del sistema (el que tengas configurado en Android)
+const DEFAULT_TONE = 'content://settings/system/alarm_alert';
+const toneOf = (st) => (typeof st.tone === 'string' && st.tone ? st.tone : DEFAULT_TONE);
+const fmtInt = (v) => (v >= 60 && v % 60 === 0 ? `${v / 60} m` : `${v} s`);
 
 const C = {
   bg: '#0D1520', card: '#142033', line: '#243650', text: '#E6EDF5', muted: '#7F93AB',
@@ -26,21 +26,38 @@ const C = {
 // ---------- sonido en bucle ----------
 function useLoopSound() {
   const ref = useRef(null);
+  const seq = useRef(0);
   const stop = useCallback(async () => {
-    const s = ref.current;
+    seq.current += 1;
+    const snd = ref.current;
     ref.current = null;
-    if (s) { try { await s.stopAsync(); await s.unloadAsync(); } catch {} }
+    if (snd) { try { await snd.stopAsync(); await snd.unloadAsync(); } catch {} }
   }, []);
-  const play = useCallback(async (idx) => {
+  // Reproduce `uri` en bucle; si falla prueba el tono del sistema por defecto. Lanza error si nada suena.
+  const play = useCallback(async (uri) => {
     await stop();
+    const mine = seq.current;
     try {
-      await Audio.setAudioModeAsync({ staysActiveInBackground: true, shouldDuckAndroid: false });
-      const { sound } = await Audio.Sound.createAsync(TONES[idx]?.src ?? TONES[0].src,
-        { isLooping: true, shouldPlay: true, volume: 1 });
-      ref.current = sound;
+      await Audio.setAudioModeAsync({
+        staysActiveInBackground: true,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+      });
     } catch {}
+    let lastError;
+    for (const u of [...new Set([uri, DEFAULT_TONE])]) {
+      try {
+        const { sound } = await Audio.Sound.createAsync({ uri: u }, { isLooping: true, shouldPlay: true, volume: 1 });
+        if (seq.current !== mine) { await sound.unloadAsync(); return; } // se pidió parar mientras cargaba
+        ref.current = sound;
+        return;
+      } catch (e) { lastError = e; }
+    }
+    throw lastError;
   }, [stop]);
-  return { play, stop };
+  // objeto estable: si cambiase en cada render, el efecto de la alarma reiniciaría el sonido continuamente
+  return useMemo(() => ({ play, stop }), [play, stop]);
 }
 
 // ---------- App ----------
@@ -89,6 +106,9 @@ export default function App() {
     } finally { busy.current = false; }
   }, [commit]);
 
+  const [refreshing, setRefreshing] = useState(false);
+  const onRefresh = async () => { setRefreshing(true); await tick(); setRefreshing(false); };
+
   useEffect(() => {
     if (!ready) return undefined;
     tick();
@@ -111,7 +131,10 @@ export default function App() {
   const ringing = alarms.filter((a) => a.enabled && a.fired);
   const isRinging = ringing.length > 0;
   useEffect(() => {
-    if (isRinging) ring.play(settingsRef.current.tone); else ring.stop();
+    if (isRinging) {
+      ring.play(toneOf(settingsRef.current))
+        .catch((e) => Alert.alert('No se pudo reproducir el sonido', String(e?.message || e)));
+    } else ring.stop();
   }, [isRinging, ring]);
 
   const dismiss = () => commit(alarmsRef.current.map((a) => (a.fired ? { ...a, fired: false, enabled: false } : a)));
@@ -157,7 +180,9 @@ export default function App() {
           <Pressable style={s.cta} onPress={() => setEditing({})}><Text style={s.ctaTxt}>+ Crear Alarma</Text></Pressable>
         </View>
       ) : (
-        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 120 }}>
+        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh}
+            colors={[C.spot]} progressBackgroundColor={C.card} />}>
           {groups.map(({ pair, items }) => (
             <View key={pair} style={s.card}>
               <Text style={s.pair}>{pair}</Text>
@@ -291,13 +316,26 @@ function SettingsModal({ visible, settings, onChange, onClose }) {
   const [testing, setTesting] = useState(false);
   useEffect(() => { if (!visible) { test.stop(); setTesting(false); } }, [visible, test]);
   const toggleTest = async () => {
-    if (testing) { await test.stop(); setTesting(false); } else { await test.play(settings.tone); setTesting(true); }
+    if (testing) { await test.stop(); setTesting(false); return; }
+    try { await test.play(toneOf(settings)); setTesting(true); }
+    catch (e) { Alert.alert('No se pudo reproducir el sonido', String(e?.message || e)); }
   };
-  const setTone = async (i) => {
-    onChange({ tone: i });
-    if (testing) await test.play(i);
+  const pickTone = async () => {
+    if (testing) { await test.stop(); setTesting(false); }
+    try {
+      const r = await IntentLauncher.startActivityAsync('android.intent.action.RINGTONE_PICKER', {
+        extra: {
+          'android.intent.extra.ringtone.TYPE': 4, // alarmas
+          'android.intent.extra.ringtone.SHOW_DEFAULT': true,
+          'android.intent.extra.ringtone.SHOW_SILENT': false,
+          'android.intent.extra.ringtone.TITLE': 'Tono de alarma',
+        },
+      });
+      const uri = r?.extra?.['android.intent.extra.ringtone.PICKED_URI'];
+      if (typeof uri === 'string' && uri) onChange({ tone: uri });
+    } catch (e) { Alert.alert('No se pudo abrir el selector de tonos', String(e?.message || e)); }
   };
-  const setRefresh = (v) => onChange({ refresh: Math.max(1, Math.min(60, v)) });
+  const setRefresh = (v) => onChange({ refresh: Math.max(1, Math.min(300, v)) });
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -322,19 +360,22 @@ function SettingsModal({ visible, settings, onChange, onClose }) {
           <Text style={s.section}>Intervalo de refresco</Text>
           <View style={s.stepper}>
             <Pressable style={s.adjBtn} onPress={() => setRefresh(settings.refresh - 1)}><Text style={s.adjTxt}>−</Text></Pressable>
-            <Text style={s.refresh}>{settings.refresh} s</Text>
+            <Text style={s.refresh}>{fmtInt(settings.refresh)}</Text>
             <Pressable style={s.adjBtn} onPress={() => setRefresh(settings.refresh + 1)}><Text style={s.adjTxt}>+</Text></Pressable>
           </View>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-            {[1, 5, 10, 30, 60].map((v) => (
-              <Chip key={v} text={`${v} s`} on={settings.refresh === v} onPress={() => setRefresh(v)} />
+            {[1, 5, 10, 30, 60, 300].map((v) => (
+              <Chip key={v} text={fmtInt(v)} on={settings.refresh === v} onPress={() => setRefresh(v)} />
             ))}
           </View>
 
           <Text style={s.section}>Tono de alarma</Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-            {TONES.map((t, i) => <Chip key={t.name} text={t.name} on={settings.tone === i} onPress={() => setTone(i)} />)}
-          </View>
+          <Text style={{ color: C.text, marginBottom: 10 }}>
+            {toneOf(settings) === DEFAULT_TONE ? 'Alarma predeterminada del sistema' : 'Tono elegido del sistema'}
+          </Text>
+          <Pressable style={[s.btn, { backgroundColor: C.line }]} onPress={pickTone}>
+            <Text style={s.btnTxt}>Elegir tono del sistema</Text>
+          </Pressable>
           <Pressable style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={toggleTest}>
             <Text style={s.btnTxt}>{testing ? '■ Detener prueba' : '▶ Probar sonido'}</Text>
           </Pressable>

@@ -7,8 +7,25 @@
     "newArchEnabled": false,
     "android": {
       "package": "com.fer.alarmasforex",
-      "permissions": ["RECEIVE_BOOT_COMPLETED", "POST_NOTIFICATIONS", "WAKE_LOCK"]
+      "permissions": [
+        "RECEIVE_BOOT_COMPLETED",
+        "POST_NOTIFICATIONS",
+        "WAKE_LOCK"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0D1520"
+      }
     },
-    "plugins": ["expo-notifications"]
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#10B981"
+        }
+      ]
+    ],
+    "icon": "./assets/icon.png"
   }
 }
