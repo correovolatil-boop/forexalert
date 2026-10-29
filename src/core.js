@@ -5,12 +5,16 @@ export const PAIRS = [
   'GBP/USD', 'NZD/USD', 'USD/CAD', 'USD/CHF', 'USD/JPY',
 ];
 export const SOURCES = [
-  { id: 'icm', name: 'IC Markets (Raw Spread ECN Simulation)' },
-  { id: 'erapi', name: 'ExchangeRate-API' },
-  { id: 'frank', name: 'Frankfurter API' },
-  { id: 'av', name: 'Alpha Vantage REST API' },
+  { id: 'icm', name: 'IC Markets (Raw Spread ECN Simulation)', note: 'Simulación sobre la cotización diaria del BCE: no es precio de mercado en vivo' },
+  { id: 'erapi', name: 'ExchangeRate-API', note: 'Se actualiza 1 vez al día' },
+  { id: 'frank', name: 'Frankfurter API', note: 'Referencia del BCE, 1 vez al día' },
+  { id: 'av', name: 'Alpha Vantage REST API', note: 'Casi en vivo; el plan gratis permite pocas consultas al día' },
+  { id: 'custom', name: 'Fuente personalizada (URL propia)', note: 'Cualquier API con JSON; la configuras abajo' },
 ];
-export const DEFAULT_SETTINGS = { source: 'icm', apiKey: '', refresh: 5, tone: 0 };
+export const DEFAULT_SETTINGS = {
+  source: 'icm', apiKey: '', refresh: 5, tone: null,
+  customUrl: '', customPath: '', customHeaders: '',
+};
 
 const isJpy = (p) => p.endsWith('/JPY');
 export const digits = (p) => (isJpy(p) ? 3 : 5);
@@ -79,6 +83,38 @@ async function alphaVantage(pairs, key) {
   return out;
 }
 
+// Fuente personalizada: URL con marcadores {BASE} {QUOTE} {PAIR} {SYMBOL}, ruta JSON y cabeceras opcionales
+export async function customPrice(settings, pair) {
+  const [base, quote] = pair.split('/');
+  const fill = (t) => t.split('{BASE}').join(base).split('{QUOTE}').join(quote)
+    .split('{PAIR}').join(base + quote).split('{SYMBOL}').join(`${base}/${quote}`);
+  const url = fill((settings.customUrl || '').trim());
+  if (!/^https:\/\//i.test(url)) throw new Error('La URL debe empezar por https://');
+  const headers = {};
+  for (const line of (settings.customHeaders || '').split('\n')) {
+    const i = line.indexOf(':');
+    if (i > 0) headers[line.slice(0, i).trim()] = fill(line.slice(i + 1).trim());
+  }
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const text = await res.text();
+  const path = (settings.customPath || '').trim();
+  let v;
+  if (!path) v = parseFloat(text);
+  else {
+    let o = JSON.parse(text);
+    for (const k of path.replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean)) o = o?.[k];
+    v = parseFloat(o);
+  }
+  if (!(v > 0)) throw new Error('No se encontró un precio en la respuesta: ' + text.slice(0, 120));
+  return v;
+}
+async function customPrices(pairs, settings) {
+  const out = {};
+  await Promise.all(pairs.map(async (p) => { try { out[p] = await customPrice(settings, p); } catch {} }));
+  return out;
+}
+
 /** Devuelve { 'EUR/USD': 1.0853, ... }. Si la fuente falla devuelve {} (se conservan los precios previos). */
 export async function getPrices(settings, pairs) {
   if (!pairs.length) return {};
@@ -90,6 +126,7 @@ export async function getPrices(settings, pairs) {
         return Object.fromEntries(pairs.map((p) => [p, cross(rates, p)]));
       }
       case 'av': return await alphaVantage(pairs, settings.apiKey);
+      case 'custom': return await customPrices(pairs, settings);
       default: return await simulated(pairs);
     }
   } catch { return {}; }
