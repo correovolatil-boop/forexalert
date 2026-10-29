@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "Alarmas Forex",
+    "slug": "alarmas-forex",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "newArchEnabled": false,
+    "android": {
+      "package": "com.fer.alarmasforex",
+      "permissions": ["RECEIVE_BOOT_COMPLETED", "POST_NOTIFICATIONS", "WAKE_LOCK"]
+    },
+    "plugins": ["expo-notifications"]
+  }
+}
