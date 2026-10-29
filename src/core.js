@@ -15,8 +15,8 @@ export const DEFAULT_SETTINGS = {
 
 const isJpy = (p) => p.endsWith('/JPY');
 export const digits = (p) => (isJpy(p) ? 3 : 5);
-// [macro, micro] según los decimales del par
-export const steps = (p) => (isJpy(p) ? [1, 0.01] : [0.01, 0.0001]);
+// [macro, micro]: antepenúltimo y penúltimo decimal del par (el último no se modifica)
+export const steps = (p) => { const d = digits(p); return [Number(`1e-${d - 2}`), Number(`1e-${d - 1}`)]; };
 export const fmt = (p, v) => Number(v).toFixed(digits(p));
 
 // ---------- almacenamiento local ----------
@@ -102,7 +102,7 @@ export function checkAlarms(alarms, prices) {
     if (!a.enabled || a.fired || px == null) return a;
     const hit = a.condition === 'above' ? px >= a.price : px <= a.price;
     if (!hit) return a;
-    const f = { ...a, fired: true };
+    const f = { ...a, fired: true, firedAt: Date.now() };
     fired.push(f);
     return f;
   });
