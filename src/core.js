@@ -31,6 +31,7 @@ export async function loadSettings() {
     const s = { ...DEFAULT_SETTINGS, ...JSON.parse((await AsyncStorage.getItem(K_SETTINGS)) || '{}') };
     // fuentes retiradas (simulada, BCE diario, ExchangeRate-API, Alpha Vantage) -> Twelve Data
     if (!SOURCES.some((x) => x.id === s.source)) s.source = 'twelve';
+    s.refresh = Math.max(5, Math.min(600, Number(s.refresh) || 60));
     return s;
   } catch { return DEFAULT_SETTINGS; }
 }
