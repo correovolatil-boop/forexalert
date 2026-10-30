@@ -2,7 +2,7 @@ import './src/bg';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View, Text, Pressable, ScrollView, Modal, TextInput, Switch, Alert, RefreshControl,
-  AppState, StatusBar as RNStatusBar, StyleSheet,
+  AppState, StatusBar as RNStatusBar, StyleSheet, useWindowDimensions,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Audio, InterruptionModeAndroid } from 'expo-av';
@@ -245,6 +245,7 @@ export default function App() {
 
 // ---------- modal crear / editar ----------
 function AlarmModal({ alarm, prices, settings, onSave, onDelete, onClose }) {
+  const { height: winH } = useWindowDimensions();
   const inputRef = useRef(null);
   const [pair, setPair] = useState('EUR/USD');
   const [cond, setCond] = useState('above');
@@ -279,13 +280,13 @@ function AlarmModal({ alarm, prices, settings, onSave, onDelete, onClose }) {
   const adj = [[-macro, '-'], [-micro, '-'], [micro, '+'], [macro, '+']];
   const renderAdj = ([d, sg]) => (
     <Pressable key={d} style={s.adjBtn} onPress={() => adjust(d)}>
-      <Text style={s.adjTxt} numberOfLines={1} adjustsFontSizeToFit>{sg}{label(Math.abs(d))}</Text>
+      <FitText style={s.adjTxt} text={`${sg}${label(Math.abs(d))}`} fitTo={`-${label(micro)}`} />
     </Pressable>
   );
   return (
     <Modal visible={alarm !== null} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={s.backdrop} onPress={onClose} />
-      <View style={s.sheet}>
+      <View style={[s.sheet, { maxHeight: winH * 0.9 }]}>
         <ScrollView keyboardShouldPersistTaps="handled" style={s.sheetScroll}>
           <Text style={s.sheetTitle}>{alarm?.id ? 'Editar alarma' : 'Crear alarma'}</Text>
           <Pressable style={s.select} onPress={() => setOpen((o) => !o)}>
@@ -319,8 +320,7 @@ function AlarmModal({ alarm, prices, settings, onSave, onDelete, onClose }) {
           <View style={s.adjRow}>
             {adj.slice(0, 2).map(renderAdj)}
             <Pressable style={s.spotBtn} onPress={useSpot}>
-              <Text style={s.spotLbl} numberOfLines={1} adjustsFontSizeToFit>● Spot Actual</Text>
-              {prices[pair] != null && <Text style={s.spotPx}>{fmt(pair, prices[pair])}</Text>}
+              <FitText style={s.spotTxt2} max={24} text={prices[pair] != null ? fmt(pair, prices[pair]) : 'Spot'} />
             </Pressable>
             {adj.slice(2).map(renderAdj)}
           </View>
@@ -341,6 +341,7 @@ function AlarmModal({ alarm, prices, settings, onSave, onDelete, onClose }) {
 
 // ---------- modal configuración ----------
 function SettingsModal({ visible, settings, activePairs, onChange, onClose }) {
+  const { height: winH } = useWindowDimensions();
   const limited = settings.source === 'twelve' || /twelvedata\.com/i.test(settings.customUrl || '');
   const perMin = (activePairs * 60) / settings.refresh;
   const perDay = Math.round((activePairs * 86400) / settings.refresh);
@@ -383,13 +384,14 @@ function SettingsModal({ visible, settings, activePairs, onChange, onClose }) {
       Alert.alert('Fuente correcta', `EUR/USD = ${fmt('EUR/USD', v)}`);
     } catch (e) { Alert.alert('La fuente no responde bien', String(e?.message || e)); }
   };
-  const setRefresh = (v) => onChange({ refresh: Math.max(1, Math.min(300, v)) });
+  const setRefresh = (v) => onChange({ refresh: Math.max(5, Math.min(600, v)) });
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={s.backdrop} onPress={onClose} />
-      <View style={s.sheet}>
-        <ScrollView keyboardShouldPersistTaps="handled" style={s.sheetScroll}>
+      <View style={[s.sheet, { height: winH * 0.85 }]}>
+        <ScrollView keyboardShouldPersistTaps="handled" nestedScrollEnabled style={{ flex: 1 }}
+          contentContainerStyle={{ paddingBottom: 24 }}>
           <Text style={s.sheetTitle}>Ajustes</Text>
 
           <Text style={s.section}>Fuente de datos</Text>
@@ -440,7 +442,7 @@ function SettingsModal({ visible, settings, activePairs, onChange, onClose }) {
             <Pressable style={s.adjBtn} onPress={() => setRefresh(settings.refresh + 1)}><Text style={s.adjTxt}>+</Text></Pressable>
           </View>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-            {[1, 5, 10, 30, 60, 300].map((v) => (
+            {[5, 10, 30, 60, 300, 600].map((v) => (
               <Chip key={v} text={fmtInt(v)} on={settings.refresh === v} onPress={() => setRefresh(v)} />
             ))}
           </View>
@@ -468,6 +470,18 @@ function SettingsModal({ visible, settings, activePairs, onChange, onClose }) {
         </ScrollView>
       </View>
     </Modal>
+  );
+}
+
+// Texto que rellena el ancho de su botón: tamaño = ancho medido / ancho estimado del texto
+const emWidth = (str) => [...str].reduce((t, ch) => t + (ch === '.' ? 0.28 : 0.58), 0) * 1.05;
+function FitText({ text, fitTo, style, max = 22 }) {
+  const [w, setW] = useState(0);
+  const size = w ? Math.max(10, Math.min(max, Math.floor((w - 6) / emWidth(fitTo || text)))) : 12;
+  return (
+    <View style={{ alignSelf: 'stretch', alignItems: 'center' }} onLayout={(e) => setW(e.nativeEvent.layout.width)}>
+      <Text numberOfLines={1} style={[style, { fontSize: size }]}>{text}</Text>
+    </View>
   );
 }
 
@@ -507,12 +521,11 @@ const s = StyleSheet.create({
   seg: { flexDirection: 'row', backgroundColor: C.bg, borderRadius: 12, padding: 4, marginBottom: 14 },
   segBtn: { flex: 1, paddingVertical: 12, alignItems: 'center', borderRadius: 9 },
   input: { color: C.text, fontSize: 34, fontWeight: '700', textAlign: 'center', backgroundColor: C.bg, borderRadius: 12, paddingVertical: 14, marginBottom: 12 },
-  adjRow: { flexDirection: 'row', gap: 6, marginBottom: 12 },
+  adjRow: { flexDirection: 'row', gap: 4, marginBottom: 12 },
   adjBtn: { flex: 1, backgroundColor: C.line, borderRadius: 10, paddingVertical: 13, paddingHorizontal: 2, alignItems: 'center', justifyContent: 'center' },
-  adjTxt: { color: C.text, fontWeight: '700', fontSize: 15 },
-  spotBtn: { flex: 1.8, borderWidth: 1, borderColor: C.spot, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 2, alignItems: 'center', justifyContent: 'center' },
-  spotLbl: { color: C.spot, fontWeight: '700', fontSize: 13 },
-  spotPx: { color: C.spot, fontSize: 11 },
+  adjTxt: { color: C.text, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  spotBtn: { flex: 1.5, borderWidth: 1, borderColor: C.spot, borderRadius: 10, paddingVertical: 13, paddingHorizontal: 2, alignItems: 'center', justifyContent: 'center' },
+  spotTxt2: { color: C.spot, fontWeight: '700', fontVariant: ['tabular-nums'] },
   btn: { flex: 1, borderRadius: 12, paddingVertical: 15, alignItems: 'center' },
   btnTxt: { color: C.text, fontWeight: '800', fontSize: 16 },
   section: { color: C.muted, fontSize: 14, fontWeight: '700', marginTop: 16, marginBottom: 8 },
