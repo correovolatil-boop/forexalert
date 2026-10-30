@@ -24,6 +24,8 @@ export async function notifyFired(fired) {
 }
 
 TaskManager.defineTask(TASK, async () => {
+  // Si el monitor está vivo en este mismo runtime, él ya vigila: no duplicar consultas ni escrituras
+  if (globalThis.__alarmasMonitor) return BackgroundFetch.BackgroundFetchResult.NoData;
   try {
     const [alarms, settings] = await Promise.all([loadAlarms(), loadSettings()]);
     const pending = alarms.filter((a) => a.enabled && !a.fired);

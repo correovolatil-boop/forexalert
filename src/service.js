@@ -18,7 +18,7 @@ export function describe(alarms) {
   const active = alarms.filter((a) => a.enabled);
   const fired = active.filter((a) => a.fired);
   const n = active.length;
-  const taskTitle = `${n} ${n === 1 ? 'alarma activa' : 'alarmas activas'}`
+  const taskTitle = (fired.length ? '⏰ ' : '') + `${n} ${n === 1 ? 'alarma activa' : 'alarmas activas'}`
     + (fired.length ? ` · ${fired.length} ${fired.length === 1 ? 'saltó' : 'saltaron'}` : '');
   const taskDesc = [
     ...fired.map((a) => `⏰ ${line(a)} · saltó${a.firedAt ? ' ' + hhmm(a.firedAt) : ''}`),
