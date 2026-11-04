@@ -15,7 +15,24 @@ const EXO = 'node_modules/expo-av/android/src/main/java/expo/modules/av/player/S
 
 const ALARM_METHOD = `
     public static final int ALARM_NOTIFICATION_ID = 92902;
-    private static final String ALARM_CHANNEL_ID = "ALARM_FIRED_CHANNEL";
+    public static final String ALARM_CHANNEL_ID = "ALARM_FIRED_CHANNEL";
+
+    // Canal de alarma: importancia alta (necesaria para la pantalla completa) pero SILENCIOSO:
+    // el sonido lo pone la app en bucle, la notificacion no debe sustituirlo
+    public static void ensureAlarmChannel(@NonNull Context context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            final NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm.getNotificationChannel(ALARM_CHANNEL_ID) != null) {
+                return;
+            }
+            final NotificationChannel ch = new NotificationChannel(ALARM_CHANNEL_ID, "Alarma disparada", NotificationManager.IMPORTANCE_HIGH);
+            ch.setSound(null, null);
+            ch.enableVibration(true);
+            ch.setVibrationPattern(new long[]{0, 600, 300, 600});
+            ch.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            nm.createNotificationChannel(ch);
+        }
+    }
 
     // Titulo que empieza por \\u23F0 = alarma disparada: notificacion aparte, prioritaria y a pantalla completa
     public static void syncAlarmNotification(@NonNull Context context, @NonNull final BackgroundTaskOptions bgOptions) {
@@ -25,14 +42,7 @@ const ALARM_METHOD = `
             nm.cancel(ALARM_NOTIFICATION_ID);
             return;
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            final NotificationChannel ch = new NotificationChannel(ALARM_CHANNEL_ID, "Alarma disparada", NotificationManager.IMPORTANCE_HIGH);
-            ch.setSound(null, null);
-            ch.enableVibration(true);
-            ch.setVibrationPattern(new long[]{0, 600, 300, 600});
-            ch.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-            nm.createNotificationChannel(ch);
-        }
+        ensureAlarmChannel(context);
         final Intent launch = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
         if (launch == null) {
             return;
@@ -60,6 +70,93 @@ const ALARM_METHOD = `
         nm.notify(ALARM_NOTIFICATION_ID, n);
     }
 `;
+
+const MODULE_IMPORTS = `import android.content.Intent;
+import android.app.NotificationChannel;
+import android.media.AudioManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.PowerManager;
+import android.provider.Settings;
+import com.facebook.react.bridge.Arguments;
+import com.facebook.react.bridge.WritableMap;`;
+
+// Estado del sistema que decide si la alarma puede mostrarse/sonar, y apertura directa de esos ajustes
+const MODULE_METHODS = `@SuppressWarnings("unused")
+    @ReactMethod
+    public void getAlarmDiagnostics(@NonNull final Promise promise) {
+        try {
+            final Context ctx = reactContext;
+            final NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            final WritableMap m = Arguments.createMap();
+            m.putInt("sdk", Build.VERSION.SDK_INT);
+            m.putBoolean("notificationsEnabled", nm.areNotificationsEnabled());
+            boolean fullScreen = true;
+            if (Build.VERSION.SDK_INT >= 34) {
+                try {
+                    fullScreen = (Boolean) nm.getClass().getMethod("canUseFullScreenIntent").invoke(nm);
+                } catch (Exception ignored) {
+                    fullScreen = true;
+                }
+            }
+            m.putBoolean("fullScreen", fullScreen);
+            RNBackgroundActionsTask.ensureAlarmChannel(ctx);
+            int importance = -1;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                final NotificationChannel ch = nm.getNotificationChannel(RNBackgroundActionsTask.ALARM_CHANNEL_ID);
+                if (ch != null) {
+                    importance = ch.getImportance();
+                }
+            }
+            m.putInt("channelImportance", importance);
+            final PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            m.putBoolean("batteryUnrestricted", pm.isIgnoringBatteryOptimizations(ctx.getPackageName()));
+            m.putInt("dnd", nm.getCurrentInterruptionFilter());
+            final AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            m.putInt("alarmVolume", am.getStreamVolume(AudioManager.STREAM_ALARM));
+            m.putInt("alarmVolumeMax", am.getStreamMaxVolume(AudioManager.STREAM_ALARM));
+            promise.resolve(m);
+        } catch (Exception e) {
+            promise.reject(e);
+        }
+    }
+
+    @SuppressWarnings("unused")
+    @ReactMethod
+    public void openAlarmSettings(@NonNull final String what, @NonNull final Promise promise) {
+        try {
+            final String pkg = reactContext.getPackageName();
+            final Uri pkgUri = Uri.parse("package:" + pkg);
+            Intent i;
+            if ("fullscreen".equals(what)) {
+                i = new Intent("android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENT", pkgUri);
+            } else if ("battery".equals(what)) {
+                i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, pkgUri);
+            } else if ("channel".equals(what)) {
+                RNBackgroundActionsTask.ensureAlarmChannel(reactContext);
+                i = new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, pkg)
+                        .putExtra(Settings.EXTRA_CHANNEL_ID, RNBackgroundActionsTask.ALARM_CHANNEL_ID);
+            } else {
+                i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri);
+            }
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                reactContext.startActivity(i);
+            } catch (Exception first) {
+                final Intent fb = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri);
+                fb.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                reactContext.startActivity(fb);
+            }
+            promise.resolve(null);
+        } catch (Exception e) {
+            promise.reject(e);
+        }
+    }
+
+    @SuppressWarnings("unused")
+    @ReactMethod
+    public void addListener(String eventName) {`;
 
 // Cada paso: [marca que indica que ya está aplicado, texto a buscar, texto nuevo]
 function patchFile(root, rel, steps) {
@@ -99,6 +196,8 @@ module.exports = (config) => {
         'public static final int SERVICE_NOTIFICATION_ID = 92901;\n' + ALARM_METHOD],
     ]);
     patchFile(root, BG + 'BackgroundActionsModule.java', [
+      ['import android.net.Uri;', 'import android.content.Intent;', MODULE_IMPORTS],
+      ['getAlarmDiagnostics', '@SuppressWarnings("unused")\n    @ReactMethod\n    public void addListener(String eventName) {', MODULE_METHODS],
       ['syncAlarmNotification',
         'notificationManager.notify(RNBackgroundActionsTask.SERVICE_NOTIFICATION_ID, notification);',
         'notificationManager.notify(RNBackgroundActionsTask.SERVICE_NOTIFICATION_ID, notification);\n            RNBackgroundActionsTask.syncAlarmNotification(reactContext, bgOptions);'],
