@@ -1,15 +1,23 @@
 import './src/bg';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
-  View, Text, Pressable, ScrollView, Modal, TextInput, Switch, Alert, RefreshControl, Linking,
+  View, Text, Pressable, ScrollView, Modal, TextInput, Switch, Alert, RefreshControl,
   AppState, StatusBar as RNStatusBar, StyleSheet, useWindowDimensions,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as IntentLauncher from 'expo-intent-launcher';
 import { PAIRS, SOURCES, fmt, steps, getPrices, customPrice } from './src/core';
 import * as monitor from './src/monitor';
+import { isServiceRunning } from './src/service';
+import { getDiag, openSetting } from './src/diag';
 import { createLoopSound, toneOf, DEFAULT_TONE } from './src/sound';
 
+// Distancia en pips del precio actual a la alarma (+ si la alarma está por encima). El pip es el 'micro' de steps().
+const pipsText = (pair, target, spot) => {
+  const d = (target - spot) / steps(pair)[1];
+  return `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)} pips`;
+};
+const DND = { 1: 'desactivado', 2: 'solo prioridad', 3: 'silencio total (bloquea alarmas)', 4: 'solo alarmas' };
 const fmtInt = (v) => (v >= 60 && v % 60 === 0 ? `${v / 60} m` : `${v} s`);
 
 const C = {
@@ -23,7 +31,8 @@ export default function App() {
   const [editing, setEditing] = useState(null); // null | {} (nueva) | alarma
   const [showSettings, setShowSettings] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const { alarms, settings, prices, status, ready, soundError } = snap;
+  const { alarms: allAlarms, settings, prices, status, ready, soundError, log: eventLog } = snap;
+  const alarms = allAlarms.filter((a) => !a.test); // la alarma de prueba no se lista
 
   useEffect(() => {
     const off = monitor.subscribe(() => setSnap(monitor.snapshot()));
@@ -32,7 +41,7 @@ export default function App() {
     return off;
   }, []);
   useEffect(() => {
-    const sub = AppState.addEventListener('change', (st) => { if (st === 'active') monitor.tick(true); });
+    const sub = AppState.addEventListener('change', (st) => { monitor.log(`app: ${st}`); if (st === 'active') monitor.tick(true); });
     return () => sub.remove();
   }, []);
   useEffect(() => {
@@ -44,7 +53,7 @@ export default function App() {
   const onRefresh = async () => { setRefreshing(true); await monitor.tick(true); setRefreshing(false); };
 
   // Alarma sonando = activada y disparada, hasta que el usuario la apague (el sonido lo gestiona el monitor)
-  const ringing = alarms.filter((a) => a.enabled && a.fired);
+  const ringing = allAlarms.filter((a) => a.enabled && a.fired);
   const isRinging = ringing.length > 0;
 
   const saveAlarm = (data) => {
@@ -111,7 +120,10 @@ export default function App() {
                     <Text style={{ color: it.a.condition === 'above' ? C.above : C.below, fontSize: 13 }}>
                       {it.a.condition === 'above' ? '▲ Por encima' : '▼ Por debajo'}
                     </Text>
-                    <Text style={[s.price, s.num]}>{fmt(pair, it.a.price)}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+                      <Text style={[s.price, s.num]}>{fmt(pair, it.a.price)}</Text>
+                      {prices[pair] != null && <Text style={[s.pips, s.num]}>{pipsText(pair, it.a.price, prices[pair])}</Text>}
+                    </View>
                   </View>
                   <Switch value={it.a.enabled} onValueChange={() => toggle(it.a.id)}
                     trackColor={{ true: C.spot, false: C.line }} thumbColor="#fff" />
@@ -128,7 +140,7 @@ export default function App() {
 
       <AlarmModal alarm={editing} prices={prices} settings={settings} onSave={saveAlarm} onDelete={remove} onClose={() => setEditing(null)} />
       <SettingsModal visible={showSettings} settings={settings}
-        activePairs={new Set(alarms.filter((a) => a.enabled && !a.fired).map((a) => a.pair)).size} onChange={monitor.setSettings} onClose={() => setShowSettings(false)} />
+        activePairs={new Set(alarms.filter((a) => a.enabled && !a.fired).map((a) => a.pair)).size} status={status} eventLog={eventLog} onChange={monitor.setSettings} onClose={() => setShowSettings(false)} />
 
       <Modal visible={isRinging} animationType="fade" onRequestClose={() => {}}>
         <View style={s.ringing}>
@@ -242,14 +254,19 @@ function AlarmModal({ alarm, prices, settings, onSave, onDelete, onClose }) {
 }
 
 // ---------- modal configuración ----------
-function SettingsModal({ visible, settings, activePairs, onChange, onClose }) {
+function SettingsModal({ visible, settings, activePairs, status, eventLog, onChange, onClose }) {
+  const [diag, setDiag] = useState(null);
+  const refreshDiag = useCallback(() => { getDiag().then(setDiag).catch(() => setDiag(null)); }, []);
+  useEffect(() => { if (visible) refreshDiag(); }, [visible, refreshDiag]);
+  useEffect(() => { // al volver de los ajustes del sistema se vuelve a comprobar
+    const sub = AppState.addEventListener('change', (st) => { if (st === 'active' && visible) refreshDiag(); });
+    return () => sub.remove();
+  }, [visible, refreshDiag]);
   const { height: winH } = useWindowDimensions();
   const limited = settings.source === 'twelve' || /twelvedata\.com/i.test(settings.customUrl || '');
   const perMin = (activePairs * 60) / settings.refresh;
   const perDay = Math.round((activePairs * 86400) / settings.refresh);
   const over = perDay > 800 || perMin > 8;
-  const batteryExempt = () => Linking.openSettings()
-    .catch((e) => Alert.alert('No se pudo abrir los ajustes', String(e?.message || e)));
   const test = useMemo(() => createLoopSound(), []);
   useEffect(() => () => { test.stop(); }, [test]);
   const [testing, setTesting] = useState(false);
@@ -355,10 +372,36 @@ function SettingsModal({ visible, settings, activePairs, onChange, onClose }) {
           </Pressable>
 
           <Text style={s.section}>Segundo plano</Text>
-          <Text style={s.note}>Mientras haya alarmas activas la app mantiene una notificación fija para seguir vigilando con el móvil bloqueado. Quita también la restricción de batería: el botón abre la ficha de la app; entra en Batería y elige «Sin restricciones». Para que la alarma se vea sobre la pantalla de bloqueo, activa «Notificaciones a pantalla completa» en Ajustes → Aplicaciones → Acceso especial. Tras reiniciar el móvil, abre la app una vez.</Text>
-          <Pressable style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]} onPress={batteryExempt}>
-            <Text style={s.btnTxt}>Batería: abrir ajustes de la app</Text>
+          <Text style={s.note}>Mientras haya alarmas activas la app mantiene una notificación fija para seguir vigilando con el móvil bloqueado. El diagnóstico de abajo comprueba que el sistema deja sonar y mostrar la alarma.</Text>
+
+          <Text style={s.section}>Diagnóstico</Text>
+          <DiagRow ok={isServiceRunning() || activePairs === 0}
+            text={isServiceRunning() ? 'Servicio en segundo plano: activo' : 'Servicio en segundo plano: parado'} />
+          <DiagRow ok={!status.error}
+            text={status.at ? `Última consulta correcta: ${new Date(status.at).toLocaleTimeString()}` : 'Aún sin consultas correctas'} />
+          {diag && (
+            <View>
+              <DiagRow ok={diag.batteryUnrestricted} fix="Arreglar" onFix={() => openSetting('battery')}
+                text={diag.batteryUnrestricted ? 'Batería: sin restricciones' : 'Batería: restringida (el móvil puede dormir la app)'} />
+              <DiagRow ok={diag.fullScreen} fix="Permitir" onFix={() => openSetting('fullscreen')}
+                text={diag.fullScreen ? 'Pantalla de alarma sobre el bloqueo: permitida' : 'Pantalla de alarma sobre el bloqueo: NO permitida'} />
+              <DiagRow ok={diag.channelImportance >= 4 || diag.channelImportance === -1} fix="Revisar" onFix={() => openSetting('channel')}
+                text={diag.channelImportance >= 4 || diag.channelImportance === -1 ? 'Canal «Alarma disparada»: importancia alta' : 'Canal «Alarma disparada»: importancia reducida'} />
+              <DiagRow ok={diag.notificationsEnabled} fix="Activar" onFix={() => openSetting('app')}
+                text={diag.notificationsEnabled ? 'Notificaciones: activadas' : 'Notificaciones: desactivadas'} />
+              <DiagRow ok={diag.dnd !== 3} text={`No molestar: ${DND[diag.dnd] || diag.dnd}`} />
+              <DiagRow ok={diag.alarmVolume > 0} text={`Volumen de alarma: ${diag.alarmVolume}/${diag.alarmVolumeMax}`} />
+            </View>
+          )}
+          <Pressable style={[s.btn, { backgroundColor: C.line, marginTop: 10 }]}
+            onPress={() => { monitor.testAlarm(15); onClose(); Alert.alert('Prueba de alarma', 'Sonará en 15 segundos. Bloquea el móvil ahora (pantalla apagada) y espera.'); }}>
+            <Text style={s.btnTxt}>Probar alarma en 15 s</Text>
           </Pressable>
+          <Text style={[s.section, { marginTop: 14 }]}>Registro</Text>
+          <View style={s.logBox}>
+            {eventLog.slice(0, 40).map((l, i) => <Text key={i} style={s.logTxt}>{l}</Text>)}
+            {!eventLog.length && <Text style={s.logTxt}>Sin eventos todavía</Text>}
+          </View>
 
           <Pressable style={[s.btn, { backgroundColor: C.spot, marginTop: 18 }]} onPress={onClose}>
             <Text style={[s.btnTxt, { color: '#06281d' }]}>Cerrar</Text>
@@ -381,6 +424,14 @@ function FitText({ text, fitTo, style, max = 22 }) {
   );
 }
 
+const DiagRow = ({ ok, text, fix, onFix }) => (
+  <View style={s.diagRow}>
+    <Text style={{ color: ok ? C.spot : C.danger, width: 20, fontWeight: '800' }}>{ok ? '✓' : '✗'}</Text>
+    <Text style={{ color: C.text, flex: 1, fontSize: 13 }}>{text}</Text>
+    {!ok && fix && <Pressable style={s.fixBtn} onPress={onFix}><Text style={s.fixTxt}>{fix}</Text></Pressable>}
+  </View>
+);
+
 const Chip = ({ text, on, onPress, fill }) => (
   <Pressable onPress={onPress} style={[s.chip, fill && s.chipFill, on && { backgroundColor: C.text, borderColor: C.text }]}>
     <Text style={{ color: on ? C.bg : C.text, fontWeight: '600' }}>{text}</Text>
@@ -401,6 +452,12 @@ const s = StyleSheet.create({
   card: { backgroundColor: C.card, borderRadius: 16, padding: 14, marginBottom: 14 },
   pair: { color: C.text, fontSize: 18, fontWeight: '800', marginBottom: 8 },
   row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: C.line, marginVertical: 4 },
+  pips: { color: C.muted, fontSize: 13, marginLeft: 10 },
+  diagRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
+  fixBtn: { borderWidth: 1, borderColor: C.danger, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, marginLeft: 8 },
+  fixTxt: { color: C.danger, fontSize: 12, fontWeight: '700' },
+  logBox: { backgroundColor: C.bg, borderRadius: 10, padding: 10 },
+  logTxt: { color: C.muted, fontSize: 11, fontFamily: 'monospace', marginBottom: 2 },
   price: { color: C.text, fontSize: 24, fontWeight: '700' },
   spotRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5, paddingHorizontal: 12, marginVertical: 4, borderTopWidth: 1, borderBottomWidth: 1, borderColor: C.spot, backgroundColor: '#10B98114' },
   spotTxt: { color: C.spot, fontWeight: '700', fontSize: 14 },
