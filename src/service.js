@@ -11,7 +11,7 @@ const hhmm = (t) => {
   const d = new Date(t);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
-const line = (a) => `${a.pair} ${a.condition === 'above' ? '▲' : '▼'} ${fmt(a.pair, a.price)}`;
+const line = (a) => (a.test ? 'PRUEBA de alarma' : `${a.pair} ${a.condition === 'above' ? '▲' : '▼'} ${fmt(a.pair, a.price)}`);
 
 // Título: nº de alarmas activas y cuántas han saltado. Cuerpo: las que saltaron primero (⏰), luego el resto.
 export function describe(alarms) {
@@ -30,15 +30,24 @@ export function describe(alarms) {
 // El servicio solo mantiene vivo el proceso con el móvil bloqueado; el sondeo de precios lo hace App.js
 const keepAlive = () => new Promise(() => {});
 
-async function run(alarms) {
+export const isServiceRunning = () => BackgroundService.isRunning();
+
+async function run(alarms, note) {
   if (!alarms.some((a) => a.enabled)) {
-    if (BackgroundService.isRunning()) await BackgroundService.stop();
+    if (BackgroundService.isRunning()) { await BackgroundService.stop(); note('servicio: parado'); }
     return;
   }
   const d = describe(alarms);
-  if (BackgroundService.isRunning()) await BackgroundService.updateNotification(d);
-  else await BackgroundService.start(keepAlive, { ...base, ...d });
+  if (BackgroundService.isRunning()) {
+    await BackgroundService.updateNotification(d);
+    if (d.taskTitle.startsWith('⏰')) note('notificación de alarma enviada');
+  } else {
+    await BackgroundService.start(keepAlive, { ...base, ...d });
+    note('servicio: arrancado');
+  }
 }
-// Cola: evita arrancar el servicio dos veces si las alarmas cambian seguidas
+// Cola: evita arrancar el servicio dos veces si las alarmas cambian seguidas. `note` recibe eventos y errores.
 let chain = Promise.resolve();
-export const syncService = (alarms) => (chain = chain.then(() => run(alarms)).catch(() => {}));
+export const syncService = (alarms, note = () => {}) => (
+  chain = chain.then(() => run(alarms, note)).catch((e) => note(`servicio: ERROR ${e?.message || e}`))
+);

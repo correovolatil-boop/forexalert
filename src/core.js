@@ -36,6 +36,11 @@ export async function loadSettings() {
   } catch { return DEFAULT_SETTINGS; }
 }
 export const saveSettings = (s) => AsyncStorage.setItem(K_SETTINGS, JSON.stringify(s));
+const K_LOG = 'log.v1';
+export async function loadLog() {
+  try { return JSON.parse((await AsyncStorage.getItem(K_LOG)) || '[]'); } catch { return []; }
+}
+export const saveLog = (l) => AsyncStorage.setItem(K_LOG, JSON.stringify(l));
 
 // ---------- precios ----------
 // Estado de la última consulta (lo muestra la pantalla principal)
