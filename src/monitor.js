@@ -42,7 +42,7 @@ function applyRinging() {
   ringing = want;
   if (want) {
     ring.play(toneOf(state.settings))
-      .then(() => log('sonido: reproduciendo'))
+      .then((how) => log(`sonido: reproduciendo (${how})`))
       .catch((e) => { state.soundError = String(e?.message || e); log(`sonido: ERROR ${state.soundError}`); });
   } else { ring.stop(); log('sonido: parado'); }
 }
