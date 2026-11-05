@@ -71,6 +71,75 @@ const ALARM_METHOD = `
     }
 `;
 
+// Reproduce el tono de alarma en bucle con MediaPlayer por el canal de ALARMA y sin depender de la pantalla:
+// funciona con la app en segundo plano o con el movil bloqueado (expo-av se pausa con la Activity)
+const ALARM_PLAYER = `package com.asterinet.react.bgactions;
+
+import android.content.Context;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
+import android.media.RingtoneManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.PowerManager;
+
+public final class AlarmPlayer {
+    private static MediaPlayer player;
+    private static AudioFocusRequest focus;
+    private static AudioManager audio;
+
+    private AlarmPlayer() { }
+
+    public static synchronized void start(final Context context, final String uri) throws Exception {
+        stop();
+        final Context app = context.getApplicationContext();
+        final Uri source = (uri == null || uri.isEmpty())
+                ? RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM) : Uri.parse(uri);
+        final AudioAttributes attrs = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build();
+        final MediaPlayer mp = new MediaPlayer();
+        try {
+            mp.setAudioAttributes(attrs);
+            mp.setDataSource(app, source);
+            mp.setLooping(true);
+            mp.setWakeMode(app, PowerManager.PARTIAL_WAKE_LOCK);
+            mp.prepare();
+            audio = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // se pide el foco como alarma; si el sistema lo niega, la alarma suena igualmente
+                focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(attrs).build();
+                audio.requestAudioFocus(focus);
+            }
+            mp.start();
+        } catch (Exception e) {
+            mp.release();
+            throw e;
+        }
+        player = mp;
+    }
+
+    public static synchronized void stop() {
+        if (player != null) {
+            try {
+                player.stop();
+            } catch (Exception ignored) {
+                // ya estaba parado
+            }
+            player.release();
+            player = null;
+        }
+        if (focus != null && audio != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audio.abandonAudioFocusRequest(focus);
+        }
+        focus = null;
+    }
+}
+`;
+
 const MODULE_IMPORTS = `import android.content.Intent;
 import android.app.NotificationChannel;
 import android.media.AudioManager;
@@ -156,6 +225,24 @@ const MODULE_METHODS = `@SuppressWarnings("unused")
 
     @SuppressWarnings("unused")
     @ReactMethod
+    public void startAlarmSound(@NonNull final String uri, @NonNull final Promise promise) {
+        try {
+            AlarmPlayer.start(reactContext, uri);
+            promise.resolve(null);
+        } catch (Exception e) {
+            promise.reject("E_ALARM_SOUND", String.valueOf(e), e);
+        }
+    }
+
+    @SuppressWarnings("unused")
+    @ReactMethod
+    public void stopAlarmSound(@NonNull final Promise promise) {
+        AlarmPlayer.stop();
+        promise.resolve(null);
+    }
+
+    @SuppressWarnings("unused")
+    @ReactMethod
     public void addListener(String eventName) {`;
 
 // Cada paso: [marca que indica que ya está aplicado, texto a buscar, texto nuevo]
@@ -189,6 +276,7 @@ module.exports = (config) => {
 
   config = withDangerousMod(config, ['android', (c) => {
     const root = c.modRequest.projectRoot;
+    fs.writeFileSync(path.join(root, BG + 'AlarmPlayer.java'), ALARM_PLAYER);
     patchFile(root, BG + 'RNBackgroundActionsTask.java', [
       ['BigTextStyle().bigText(taskDesc)', '.setContentText(taskDesc)',
         '.setContentText(taskDesc)\n                .setStyle(new NotificationCompat.BigTextStyle().bigText(taskDesc))'],
